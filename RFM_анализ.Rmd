@@ -1,0 +1,919 @@
+---
+title: "RFM-анализ покупателей"
+output:
+   html_document:
+       theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, out.width = '100%')
+
+library(tidyverse)
+library(lubridate)
+library(rfm)
+```
+
+
+```{r}
+source(here::here("global.R"))
+
+rm(list = ls(pattern = "tbl", all.names = TRUE))
+
+date_finish <- as_datetime(floor_date(today(), unit = "month"))
+date_finish_for_base <- date_finish + years(2000)
+
+date_start  <- date_finish - months(13)
+date_start_for_base <- date_start + years(2000)
+```
+
+## за `r month(date_finish - months(1), label = TRUE, abbr = FALSE)`
+
+
+### Предварительный анализ
+
+Анализ проводится для В2В продаж (проекты "Новый клиент", "Сервис" и "Сервис ГОТІВКА")  за период с `r date_start` по `r date_finish - days()`.
+
+```{r}
+sale_data <- sale_data_global(date_start_for_base, date_finish_for_base) %>%
+    filter(project %in% c("Новый клиент", "Сервис", "Сервіс ГОТІВКА"),
+           !subdiv_name %in% c("Бухгалтерия", "Администрация",
+                              "Відділ складської логістики",
+                              "Тендерний відділ", "Кам'янецька,72"),
+           !str_detect(customer_name, "Кінцевий покупець"),
+           !str_detect(customer_name, "КІНЦЕВИЙ ПОКУПЕЦЬ")
+           ) %>% 
+    mutate(subdiv_name = str_replace(subdiv_name, "роздріб", "сервіс"),
+           date_sale_doc = as.Date(date_sale_doc) - years(2000))
+
+returns_data <- refund_data(date_start_for_base, date_finish_for_base) %>% 
+    mutate(date_refund_doc = as.Date(date_refund_doc) - years(2000),
+           date_sale_doc = as.Date(date_sale_doc) - years(2000)) %>% 
+    filter(date_sale_doc >= date_start - years(2000)) %>% 
+    group_by(nmbr_sale_doc, date_sale_doc) %>% 
+    summarise(sum_refund = sum(item_sum))
+
+customers <- data.frame(customer_id = unique(sale_data$customer_id))
+customers_with_main <- customers %>% 
+    left_join(select(ref_customers, customer_id, main_cust_id))
+customers_clr <- union(customers_with_main$customer_id, customers_with_main$main_cust_id)
+customers_clr <- customers_clr[!is.na(customers_clr)]
+
+retail_customers <- customers_with_main %>% 
+    left_join(ref_customers) %>% 
+    filter(is.na(customer_type) & edrp_code == "") %>% 
+    pull(customer_id)
+
+
+ref_users <- ref_users %>% 
+    arrange(user_name) %>% 
+    mutate(user_name = str_trim(user_name, side = "right"))
+
+ref_partner_manager_clr <- ref_partner_manager %>%
+    filter(partner_id %in% customers_clr) %>% 
+    mutate(date_entry = as.Date(date_entry) - years(2000)) %>% 
+
+ ## Если есть менеджер, но нет подразделения - определяем к какому подразделению
+ ## прикреплен менеджер 
+    left_join(ref_users) %>% 
+    mutate(subdiv_name_new = ifelse(!is.na(subdiv_name),
+                                    subdiv_name,
+                                    user_subdiv)) %>% 
+   ## Удаляем дубликаты записей (оставляем с последней датой)
+    arrange(desc(date_entry)) %>% 
+    distinct(partner_id, subdiv_name_new, user_name, .keep_all = TRUE) %>%
+
+       ## Добавляем основного менеджера и его подразделение 
+    left_join(select(ref_customers, customer_id, main_manager),
+              by = c("partner_id" = "customer_id")) %>%
+    drop_na(subdiv_name_new) %>% 
+    mutate(user_name = str_trim(user_name, side = "right"),
+           main_manager = str_trim(main_manager, side = "right")) %>%
+    left_join(select(ref_users, user_name, main_manager_subdiv_assigned = user_subdiv),
+              by = c("main_manager" = "user_name")) %>%
+ ## Если по контрагенту по подразделению определено 2 разных менеджера - основной
+    arrange(partner_id, subdiv_name_new) %>%
+    group_by(partner_id, subdiv_name_new) %>% 
+    mutate(customer_manager = ifelse(!is.na(main_manager_subdiv_assigned) &
+                                         main_manager_subdiv_assigned == subdiv_name_new,
+                                      main_manager, first(user_name))) %>%
+    ungroup() %>% 
+    distinct(partner_id, subdiv_name_new, customer_manager, .keep_all = TRUE) %>%
+
+     ## Если по контрагенту менеджер указан по нескольким подразделениям - выбираем
+     ## подразделение по последней дате_CRM
+    group_by(partner_id, customer_manager) %>%
+    mutate(subdiv_name_new = subdiv_name_new[date_entry == max(date_entry)]) %>% 
+    ungroup() %>% 
+    distinct(partner_id, customer_manager, .keep_all = TRUE) %>%
+    
+    select(customer_id = partner_id, subdiv_name = subdiv_name_new, customer_manager)
+
+customers_with_one_managers <- ref_partner_manager_clr %>% 
+    filter(customer_id %in% customers_clr) %>%
+    group_by(customer_id) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>%
+    #mutate(user_name = str_trim(user_name, side = "right")) %>% 
+    select(customer_id, only_one_manager = customer_manager,
+           only_one_man_subdiv = subdiv_name)
+
+delivery_address_tbl <- ref_delivery_addresses %>% 
+    filter(!is.na(marked),
+           partner_id %in% customers_clr) %>%
+    mutate(region_name = ifelse(parent_region == "Хмельницкий",
+                                parent_region,
+                                region_name)) %>%
+    group_by(partner_id, partner_name) %>% 
+    summarise(delivery_address_qty = length(unique(region_name[!is.na(region_name)]))) %>% 
+    ungroup()
+
+sale_df <- sale_data %>% 
+    
+  # Добавляем возвраты
+    left_join(returns_data) %>% 
+    replace_na(list(sum_refund = 0)) %>% 
+    mutate(doc_sum = doc_sum - sum_refund) %>%
+    
+  # Удаляем документы, по которым возвраты на ту же сумму
+    filter(doc_sum > 0) %>% 
+    
+  # Объединяем документы одного дня по подразделению  
+    group_by(customer_id, subdiv_name, date_sale_doc) %>% 
+    summarise(sum_customer = sum(doc_sum)) %>%
+    ungroup() %>% 
+    
+  # Удаляем документы ниже 1грн    
+    filter(sum_customer > 1) %>%
+
+  # Удаляем конечных покупателей ("PROM", "Интернет-магазин" и др.)
+    filter(!customer_id %in% retail_customers) %>%  
+  
+  # Добавляем менеджера (если для подразделения менеджер не указан - основной менеджер, 
+  #                      если и его нет - если менеджер для покупателя один)
+    left_join(ref_partner_manager_clr) %>%
+    left_join(select(ref_users, user_name, customer_manager_subdiv_assigned = user_subdiv),
+              by = c("customer_manager" = "user_name")) %>%
+    left_join(select(ref_customers, customer_id, main_manager)) %>%
+    mutate(main_manager = str_trim(main_manager, side = "right")) %>%
+    left_join(select(ref_users, user_name, main_manager_subdiv_assigned = user_subdiv),
+              by = c("main_manager" = "user_name")) %>% 
+    left_join(select(ref_partner_manager_clr, customer_id, customer_manager,
+                     main_manag_subdiv_tbl = subdiv_name),
+              by = c("customer_id" = "customer_id", "main_manager" = "customer_manager")) %>%
+    left_join(customers_with_one_managers) %>%
+    
+    group_by(customer_id) %>% 
+    mutate(subdiv_qty = length(unique(subdiv_name))) %>%
+    ungroup()
+```
+
+За этот период покупки совершило `r nrow(customers)` контрагентов без учета продаж подразделений "Бухгалтерия", "Администрация", "Відділ складської логістики", "Тендерний відділ" и без контрагентов содержащих  в наименовании "Кінцевий покупець".
+
+Документы за один день в разрезе покупатель/подразделение были объединены в один документ.
+
+Так как в продажах также есть конечные покупатели - физические лица, удаляем всех контрагентов, не имеющих тип клиента и код ЕДРПОУ (за указанный период было `r length(retail_customers)` таких покупателей).
+
+```{r}
+    ## Меняем подразделение     
+sale_df <- sale_df %>% 
+    mutate(subdiv_name = ifelse(subdiv_name == "PROM",
+                               "Интернет-магазин",
+                               subdiv_name),
+           subdiv_rfm = ifelse(subdiv_name %in% c("Департамент корпоративного продажу",
+                                                  "Департамент регіонального розвитку",
+                                                  "Відділ маркетингу"),
+                                ifelse(!is.na(only_one_man_subdiv),
+                                        only_one_man_subdiv,
+                                        ifelse(!is.na(main_manag_subdiv_tbl),
+                                                main_manag_subdiv_tbl,
+                                                subdiv_name)),
+
+                            ifelse(subdiv_name == "Интернет-магазин",
+                                    ifelse(!is.na(only_one_man_subdiv),
+                                            only_one_man_subdiv,
+                                            subdiv_name),
+                                     subdiv_name)),
+           customer_manager_rfm = ifelse(subdiv_name %in%
+                                             c("Департамент корпоративного продажу",
+                                               "Департамент регіонального розвитку",
+                                               "Відділ маркетингу"),
+                                      ifelse(!is.na(only_one_manager),
+                                                    only_one_manager,
+                                                    ifelse(!is.na(main_manag_subdiv_tbl) &
+                                                               !is.na(main_manager),
+                                                           main_manager,
+                                                           customer_manager)),
+
+                                      ifelse(subdiv_name == "Интернет-магазин",
+                                             ifelse(!is.na(only_one_manager),
+                                                     only_one_manager,
+                                                     customer_manager),
+                                             customer_manager)))
+
+manager_lutsk <- ref_partner_manager_clr %>% 
+    filter(subdiv_name %in% c("Луцьк см сервіс",
+                              "Луцьк Ковельськ")) %>%
+    left_join(select(ref_customers, customer_id, main_manager)) %>%
+    mutate(main_manager = str_trim(main_manager, side = "right")) %>%
+    left_join(select(ref_partner_manager_clr, customer_id, customer_manager,
+                     main_manag_subdiv_tbl = subdiv_name),
+              by = c("customer_id" = "customer_id", "main_manager" = "customer_manager")) %>%
+    group_by(customer_id) %>% 
+    mutate(lutsk_subdiv = ifelse(main_manag_subdiv_tbl %in% c("Луцьк см сервіс",
+                                                              "Луцьк Ковельськ"),
+                                 main_manag_subdiv_tbl,
+                                 subdiv_name),
+           lutsk_man    = ifelse(main_manag_subdiv_tbl %in% c("Луцьк см сервіс",
+                                                              "Луцьк Ковельськ"),
+                                 main_manager,
+                                 customer_manager)) %>%
+    ungroup() %>% 
+    distinct(customer_id, lutsk_subdiv, lutsk_man)
+
+lutsk_pare <- sale_df %>% 
+    group_by(customer_id) %>% 
+    filter(any(subdiv_rfm == "Луцьк см сервіс") | any(subdiv_rfm == "Луцьк Ковельськ")) %>% 
+    arrange(date_sale_doc, .by_group = TRUE) %>%
+    mutate(subdiv_lutsk_qty = length(unique(subdiv_rfm
+                                         [subdiv_rfm %in% c("Луцьк см сервіс",
+                                                                       "Луцьк Ковельськ")])),
+           last_subdiv = ifelse(subdiv_lutsk_qty == 2,
+                                last(subdiv_rfm[subdiv_rfm %in% c("Луцьк см сервіс",
+                                                                  "Луцьк Ковельськ")]),
+                                NA)
+           ) %>% 
+    ungroup() %>% 
+    filter(subdiv_rfm %in% c("Луцьк см сервіс", "Луцьк Ковельськ")
+           ) %>% 
+    left_join(manager_lutsk) %>% 
+    mutate(subdiv_new = ifelse(!is.na(only_one_man_subdiv),
+                               only_one_man_subdiv,
+                               ifelse(main_manag_subdiv_tbl %in% c("Луцьк см сервіс",
+                                                                   "Луцьк Ковельськ"),
+                                      main_manag_subdiv_tbl,
+                                      ifelse(!is.na(lutsk_subdiv),
+                                             lutsk_subdiv,
+                                             ifelse(subdiv_lutsk_qty == 2,
+                                                    last_subdiv,
+                                                    subdiv_rfm)))),
+           customer_manager_new = ifelse(!is.na(only_one_manager),
+                                         only_one_manager,
+                                         ifelse(main_manag_subdiv_tbl %in%
+                                                    c("Луцьк см сервіс",
+                                                      "Луцьк Ковельськ"),
+                                                main_manager,
+                                                ifelse(!is.na(lutsk_man),
+                                                       lutsk_man,
+                                                       customer_manager_rfm)))
+           ) %>% 
+    select(-c(subdiv_lutsk_qty, last_subdiv, lutsk_subdiv, lutsk_man))
+
+
+starkon_pare <- sale_df %>% 
+    group_by(customer_id) %>% 
+    mutate(subdiv_qty_new = length(unique(subdiv_rfm))) %>% 
+    filter(subdiv_qty_new > 1) %>% 
+    arrange(date_sale_doc, .by_group = TRUE) %>% 
+    filter(any(subdiv_rfm == "Старкон ТоргівельнийЦентр") &
+               any(subdiv_rfm == "Старокостянтинів Планета") 
+    ) %>% 
+    filter(subdiv_rfm %in% c("Старкон ТоргівельнийЦентр",
+                             "Старокостянтинів Планета")) %>%
+    mutate(last_subdiv  = last(na.omit(subdiv_rfm)),
+           last_manager = last(na.omit(customer_manager_rfm))) %>% 
+    ungroup() %>%
+    mutate(subdiv_new = ifelse(!is.na(only_one_man_subdiv),
+                                only_one_man_subdiv,
+                                ifelse(main_manag_subdiv_tbl %in%
+                                           c("Старкон ТоргівельнийЦентр",
+                                             "Старокостянтинів Планета"),
+                                       main_manag_subdiv_tbl,
+                                       last_subdiv)),
+           customer_manager_new = ifelse(!is.na(only_one_manager),
+                                          only_one_manager,
+                                          ifelse(main_manag_subdiv_tbl %in%
+                                                     c("Старкон ТоргівельнийЦентр",
+                                             "Старокостянтинів Планета"),
+                                                 main_manager,
+                                                 last_manager))) %>% 
+    select(-c(last_subdiv, last_manager))
+
+ternopil_pare <- sale_df %>% 
+    group_by(customer_id) %>% 
+    mutate(subdiv_qty_new = length(unique(subdiv_rfm))) %>% 
+    filter(subdiv_qty_new > 1) %>% 
+    arrange(date_sale_doc, .by_group = TRUE) %>% 
+    filter(any(subdiv_rfm == "Тернопіль см сервіс") &
+               any(subdiv_rfm == "Кременець") 
+    ) %>% 
+    filter(subdiv_rfm %in% c("Тернопіль см сервіс", "Кременець")) %>%
+    mutate(last_subdiv = last(na.omit(subdiv_rfm)),
+           last_manager = last(na.omit(customer_manager_rfm))) %>% 
+    ungroup() %>%
+    mutate(subdiv_new = ifelse(!is.na(only_one_man_subdiv),
+                                only_one_man_subdiv,
+                                ifelse(main_manag_subdiv_tbl %in%
+                                           c("Тернопіль см сервіс", "Кременець"),
+                                       main_manag_subdiv_tbl,
+                                       last_subdiv)),
+           customer_manager_new = ifelse(!is.na(only_one_manager),
+                                          only_one_manager,
+                                          ifelse(main_manag_subdiv_tbl %in%
+                                                     c("Тернопіль см сервіс", "Кременець"),
+                                                 main_manager,
+                                                 last_manager))) %>% 
+    select(-c(last_subdiv, last_manager))
+
+yarmol_pare <- sale_df %>% 
+    filter(subdiv_rfm == "Ярмолинці" 
+          ) %>%
+    mutate(subdiv_new = ifelse(!is.na(only_one_man_subdiv),
+                                only_one_man_subdiv,
+                                ifelse(!is.na(main_manag_subdiv_tbl),
+                                       main_manag_subdiv_tbl, 
+                                       subdiv_rfm)),
+           customer_manager_new = ifelse(!is.na(only_one_manager),
+                                          only_one_manager,
+                                          ifelse(!is.na(main_manager),
+                                                  main_manager, 
+                                                  customer_manager_rfm)))
+
+
+internet_pare <- sale_df %>%
+    left_join(select(delivery_address_tbl, partner_id, delivery_address_qty),
+              by = c("customer_id" = "partner_id")) %>%
+    group_by(customer_id) %>% 
+    mutate(subdiv_qty_new = length(unique(subdiv_rfm))) %>% 
+    filter(subdiv_qty_new > 1) %>% 
+    arrange(date_sale_doc, .by_group = TRUE) %>% 
+    filter(any(subdiv_rfm == "Интернет-магазин") 
+    ) %>% 
+    mutate(internet_share = sum(subdiv_name == "Интернет-магазин") / n()) %>% 
+    filter(!is.na(only_one_man_subdiv) |
+            delivery_address_qty <= 1 |    
+            subdiv_rfm == "Интернет-магазин") %>%
+    mutate(last_subdiv = last(subdiv_rfm[date_sale_doc < date_finish]),
+           last_manager = last(customer_manager_rfm[date_sale_doc < date_finish])) %>% 
+    ungroup() %>%
+    mutate(subdiv_new = ifelse(!is.na(only_one_man_subdiv),
+                                only_one_man_subdiv,
+                                ifelse(delivery_address_qty <= 1,
+                                       ifelse(!is.na(main_manag_subdiv_tbl),
+                                              main_manag_subdiv_tbl,
+                                              last_subdiv),
+                                       ifelse(subdiv_rfm == "Интернет-магазин",
+                                              ifelse(is.na(customer_manager_rfm),
+                                                     main_manag_subdiv_tbl,
+                                                     ifelse(delivery_address_qty >=
+                                                                subdiv_qty_new |
+                                                            internet_share >= 0.1,
+                                                            subdiv_rfm,
+                                                            main_manag_subdiv_tbl)),
+                                              subdiv_rfm
+                                        ))),
+           customer_manager_new = ifelse(!is.na(only_one_manager),
+                                          only_one_manager,
+                                          ifelse(delivery_address_qty <= 1,
+                                                 ifelse(!is.na(main_manag_subdiv_tbl),
+                                                         main_manager,
+                                                         last_manager),
+                                                 ifelse(subdiv_rfm == "Интернет-магазин",
+                                                        ifelse(is.na(customer_manager_rfm),
+                                                               main_manager,
+                                                               ifelse(delivery_address_qty >=
+                                                                          subdiv_qty_new |
+                                                                      internet_share >= 0.1,
+                                                                      customer_manager_rfm,
+                                                                      main_manager)),
+                                                         customer_manager_rfm
+                                         ))),
+
+           ) %>% 
+    select(-c(internet_share, delivery_address_qty, last_subdiv, last_manager))
+
+
+pare_df <- bind_rows(lutsk_pare,
+                     starkon_pare,
+                     ternopil_pare,
+                     yarmol_pare,
+                     internet_pare) %>% 
+    distinct(customer_id, subdiv_new, date_sale_doc, sum_customer,
+             .keep_all = TRUE)
+
+sale_df_new <- sale_df %>%
+    left_join(select(pare_df, -subdiv_qty_new)) %>% 
+    mutate(subdiv_new = ifelse(subdiv_name %in% c("Проспект Центр","Славута"),
+                               ifelse(!is.na(main_manag_subdiv_tbl),
+                                       main_manag_subdiv_tbl,
+                                       subdiv_name),
+                               ifelse(is.na(subdiv_new),
+                                      subdiv_rfm,
+                                      subdiv_new)),
+           customer_manager_new = ifelse(subdiv_name %in% c("Проспект Центр","Славута"),
+                                         main_manager,
+                                         ifelse(is.na(customer_manager_new),
+                                                customer_manager_rfm,
+                                                customer_manager_new))) %>% 
+
+## Изменяем подразделение, если прописано лишь одно подразделение для контрагента
+    group_by(customer_id) %>% 
+    mutate(subdiv_qty_new = length(unique(subdiv_new))) %>% 
+    ungroup() %>% 
+    mutate(
+           subdiv_new = ifelse(is.na(customer_manager_new) &
+                                     subdiv_qty_new > 1 &
+                                    !is.na(only_one_manager),
+                               only_one_man_subdiv,
+                               subdiv_new),
+           customer_manager_new = ifelse(is.na(customer_manager_new) &
+                                               subdiv_qty_new > 1 &
+                                              !is.na(only_one_manager),
+                                         only_one_manager,
+                                         customer_manager_new)) %>% 
+    group_by(customer_id) %>% 
+    mutate(
+           subdiv_qty_new = length(unique(subdiv_new))
+                               ) %>%
+    ungroup() %>% 
+
+## Изменяем подразделение, если у контрагента один адрес доставки и количество документов
+ # по подразделению 0 или 1
+
+    left_join(select(delivery_address_tbl, partner_id, delivery_address_qty),
+              by = c("customer_id" = "partner_id")) %>%
+    group_by(customer_id) %>%
+    add_count(subdiv_new) %>%
+    mutate(last_subdiv  = last(subdiv_new[n == max(n)]),
+           last_manager = last(customer_manager_new[n == max(n)]),
+           max_n = max(n)) %>% 
+    ungroup() %>% 
+    mutate(subdiv_new =  ifelse(subdiv_qty_new > 1 &
+                                     delivery_address_qty <= 1,
+                                ifelse(max_n <= 1,
+                                       ifelse(!is.na(main_manag_subdiv_tbl),
+                                              main_manag_subdiv_tbl,
+                                              last_subdiv),
+                                       ifelse(n <= 1,
+                                              last_subdiv,
+                                              subdiv_new
+                                              )),
+                                subdiv_new),
+           customer_manager_new =  ifelse(subdiv_qty_new > 1 &
+                                              delivery_address_qty <= 1,
+                                          ifelse(max_n <= 1,
+                                                 ifelse(!is.na(main_manager),
+                                                         main_manager,
+                                                         last_manager),
+                                                 ifelse(n <= 1,
+                                                        last_manager,
+                                                        customer_manager_new)),
+                                   customer_manager_new)
+           ) %>% 
+    select(-c(n, max_n, last_subdiv, last_manager)) %>% 
+    
+    left_join(select(ref_customers, customer_id, registr_date,
+                     segment_form, customer_type, main_cust_id)) %>%
+    left_join(select(ref_customers, customer_id, 
+                                    main_customer_type = customer_type,
+                                    main_customer_segment = segment_form,
+                                    main_customer_registr_date = registr_date),
+              by = c("main_cust_id" = "customer_id")) %>%
+    mutate(registr_date = ifelse(year(registr_date - years(2000)) <= 2016 |
+                                     is.na(registr_date),
+                                 2016,
+                                 year(registr_date - years(2000))),
+           main_customer_registr_date = ifelse(year(main_customer_registr_date -
+                                                    years(2000)) <= 2016 |
+                                                    is.na(main_customer_registr_date),
+                                               2016,
+                                               year(main_customer_registr_date -
+                                                    years(2000)))
+           )%>%
+    left_join(select(ref_partner_manager_clr, customer_id,
+                     subdiv_name,
+                     main_customer_manager = customer_manager),
+              by = c("main_cust_id" = "customer_id",
+                     "subdiv_new" = "subdiv_name")) %>%
+
+    # Указываем менеджера, если для головного контрагента он определен, а для подчиненного нет    
+    mutate(customer_manager_new = ifelse(is.na(customer_manager_new) &
+                                         !is.na(main_customer_manager),
+                                         main_customer_manager,
+                                         customer_manager_new),
+ 
+    # Меняем на Головного контрагента (если совпадают типы и менеджеры) 
+           customer_rfm_id = ifelse(!is.na(main_cust_id) &
+                                        # !is.na(segment_form) &
+                                        # !is.na(main_customer_segment) &
+                                        #  segment_form == main_customer_segment &
+                                        !is.na(main_customer_manager) &
+                                         main_customer_manager == customer_manager_new,
+                                     main_cust_id,
+                                     customer_id),
+           main_flag = ifelse(customer_rfm_id == customer_id,
+                              0,
+                              1),
+    
+    # Меняем дату регистрации, если у Головного контрагента она раньше 
+           registr_date_rfm = ifelse(main_flag == 1,
+                                     min(main_customer_registr_date, registr_date),
+                                     registr_date),
+    
+           subdiv_change_flag = ifelse(subdiv_name == subdiv_new,
+                                       0,
+                                       1))
+
+
+manager_problem <- filter(sale_df_new, is.na(customer_manager_new)) %>% 
+     summarise(n_distinct(customer_id)) %>% pull()
+
+segment_problem <- sale_df_new %>%
+    filter(is.na(segment_form)) %>% 
+    distinct(customer_rfm_id, .keep_all = TRUE) %>% 
+    nrow()
+
+type_problem <- sale_df_new %>%
+    filter(is.na(customer_type)) %>% 
+    distinct(customer_rfm_id, .keep_all = TRUE) %>% 
+    nrow()
+
+main_manager_problem <- filter(sale_df_new, is.na(customer_manager),
+                                            main_manager != only_one_manager) %>% 
+    distinct(customer_id, subdiv_rfm, .keep_all = TRUE) %>% 
+    nrow()
+```
+
+Для проведения анализа решались следующие проблемы:  
+1. сетевые покупатели - покупатели, имеющие подразделения в разных городах и, соответсвенно, обслуживаемые различными подразделениями компании. Для того, чтобы не потерять отдельные подразделения таких покупателей, каждое подразделение такого покупателя мы будем рассматривать как отдельного покупателя, то есть анализ будет проводиться в разрезе покупатель/подразделение. При этом отдельно решались продажи по подразделениям "Департамент корпоративного продажу", "Департамент регіонального розвитку", "Интернет-магазин", Ярмолинцы, а также нескольких подразделений, находящихся в одном городе (Староконстантинов и Луцк) или области (Тернополь и Кременец): продажи по этим подразделениям перебрасывались на подразделение основного менеджера. При этом была обнаружена следующая **ошибка** - у `r main_manager_problem` контрагентов в справочнике контрагентов не видно основного менеджера (хотя они определены). Также были переопределены подразделения, для которых:  
+- не указан менеджер для контрагента, в случае, если для контрагента определено только одно подразделение;  
+- контрагенты имеют один адрес доставки (один регион) и одну отгрузку по подразделению.
+
+2. холдинги - так как в системе учета компании холдинги используются в самых разных случаях (разные юрлица занимются разными видами деятельности; разные юрлица занимаются одним видом деятельности (как у компании); одно юрлицо приемник другого; юрлица не связаны, но имеют одно ЛПР). В этом случае для дальнейшего анализа продажи подчиненного контрагента засчитывались на Головного контрагента, если они имели одинаковый тип и одного менеджера.
+
+На момент формирования отчета (`r now()`) были выявлены следующие ошибки ведения базы данных, влияющие на результаты анализа:  
+- для `r manager_problem` покупателей не указан менеджер покупателя; при этом также есть покупатели, для которых по определенному подразделению указано несколько менеджеров - в этом случае использовался основной менеджер(если он не указан - с последней датой);  
+- у `r segment_problem` покупателей не указан их сегмент;  
+- у `r type_problem` покупателей не указан их тип (бюджет-корпоратив)
+
+После проведенных преобразований общее количество покупателей стало `r length(unique(sale_df_new$customer_rfm_id))`.
+
+```{r}
+rm(sale_data, returns_data, sale_df)
+
+rfm_data_current <- sale_df_new %>%
+    filter(date_sale_doc >= date_finish - months(12)) %>%
+    group_by(customer_rfm_id) %>% 
+    mutate(subdiv_qty_rfm = length(unique(subdiv_new))) %>% 
+    ungroup() %>%
+    group_by(customer_rfm_id, subdiv_new) %>% 
+    summarise(segment_form     = first(na.omit(segment_form)),
+              customer_type    = first(na.omit(customer_type)),
+              customer_manager = last(na.omit(customer_manager_new)),
+              main_change_flag = sum(main_flag),
+              subdiv_change_flag = sum(subdiv_change_flag),
+              registr_date     = first(registr_date_rfm),
+              subdiv_qty       = first(subdiv_qty_rfm),
+              recency = as.numeric(as.Date(date_finish) - max(date_sale_doc)),
+              frequency = n(),
+              monetary  = sum(sum_customer)) %>% 
+    ungroup()
+
+customers_tbl <- rfm_data_current %>% 
+    select(customer_rfm_id,
+           segment_form,
+           customer_type,
+           registr_date,
+           main_change_flag,
+           subdiv_change_flag,
+           subdiv_new,
+           customer_manager
+           ) %>% 
+    distinct(customer_rfm_id, subdiv_new, .keep_all = TRUE)
+
+rfm_data_current <-  rfm_data_current %>% 
+    mutate(customer_code = paste(customer_rfm_id,
+                                 subdiv_new,
+                                 sep = ";")) %>% 
+    select(customer_code, recency, frequency, monetary)
+```
+
+Посмотрим на сводную статистику значений Давности, Частоты и Суммы (при расчете частоты все документы покупателя за один день объединялись):
+
+```{r}
+library(corrmorant)
+ggcorrm(data = rfm_data_current[2:4],
+        labels = c("Давность", "Частота", "Сумма")) +
+    lotri(geom_point(alpha = 0.5)) +
+    lotri(geom_smooth()) +
+    utri_heatmap() +
+    utri_corrtext() +
+    dia_names(y_pos = 0.15, size = 3) +
+    dia_histogram(lower = 0.3, fill = "grey80", color = 1) +
+    scale_fill_corr() +
+    labs(title = "Анализ показателей")
+
+summary_stats <- rfm_data_current %>%
+    pivot_longer(cols = 2:4,
+                 names_to = "Показатель",
+                 values_to = "Значение") %>% 
+    group_by(`Показатель`) %>%
+    ggpubr::get_summary_stats(show = c("min", "q1", "median", "mean", "q3", "max")) %>% 
+    select(- variable)
+
+summary_stats$`Показатель` <- c("Частота", "Сумма", "Давность")
+
+knitr::kable(summary_stats)
+```
+
+
+### Результаты RFM
+
+Поcмотрим, сколько покупателей по попало в каждый RFM-сегмент
+
+```{r}
+rfm_result_current <- rfm_table_customer(rfm_data_current,
+                                         customer_id = customer_code,
+                                         n_transactions =  frequency,
+                                         recency_days = recency,
+                                         total_revenue = monetary,
+                                         analysis_date = date_finish,
+                                         recency_bins = c(31, 61, 161),
+                                         frequency_bins = c(3, 8, 16),
+                                         monetary_bins = c(1500, 10000, 50000))
+
+segment_names <- c("Чемпионы", "Лояльные", "Новые", "Перспективные",
+                   "Потенциально лояльные", "Требующие внимания",
+                   "Риск потерять", "Хотелось бы вернуть", "Потерянные")
+recency_lower <- c(4, 3, 3, 3, 3, 2, 2, 1, 1)
+recency_upper <- c(4, 4, 4, 4, 4, 3, 2, 1, 1)
+frequency_lower <- c(4, 3, 1, 1, 2, 2, 1, 2, 1)
+frequency_upper <- c(4, 4, 1, 1, 4, 4, 3, 4, 4)
+monetary_lower <- c(4, 2, 1, 3, 1, 1, 1, 3, 1)
+monetary_upper <- c(4, 4, 2, 4, 4, 4, 4, 4, 4)
+
+segments_current <- rfm_segment(rfm_result_current, segment_names,
+                                recency_lower, recency_upper,
+                                frequency_lower, frequency_upper,
+                                monetary_lower, monetary_upper)
+
+segments_current <- segments_current %>% 
+    mutate(segment = case_when(
+               between(rfm_score, 332, 334) ~ "Потенциально лояльные",
+               between(rfm_score, 341, 342) ~ "Потенциально лояльные",
+               rfm_score == 432 ~ "Потенциально лояльные",
+               between(rfm_score, 321, 324) ~ "Требующие внимания",
+               rfm_score == 331 ~ "Требующие внимания",
+               between(rfm_score, 221, 224) ~ "Риск потерять",
+               between(rfm_score, 231, 232) ~ "Риск потерять",
+               rfm_score == 241 ~ "Риск потерять",
+               TRUE ~ segment)
+           )
+
+df_segments <- segments_current %>% 
+    select(-c(recency_score:monetary_score)) %>% 
+    separate(customer_id, into = c("customer_id", "subdiv_name"),
+             sep = ";") %>% 
+    left_join(select(ref_customers, customer_id, customer_name)) %>% 
+    relocate(customer_name, .before = customer_id) %>% 
+    left_join(customers_tbl, by = c("customer_id" = "customer_rfm_id",
+                                    "subdiv_name" = "subdiv_new")) 
+
+writexl::write_xlsx(df_segments, paste0("RFM/RFM-анализ_за_",
+                                   month(date_finish - days(1), label = TRUE, abbr = FALSE),
+                                                 ".xlsx"))
+
+# How many customers in each segment
+clusters <- segments_current %>%
+  count(segment) %>%
+  arrange(desc(n)) %>% 
+  rename(group = segment, count = n) %>% 
+  ungroup()
+
+library(treemapify)
+library(ggsci)
+
+ggplot(clusters, aes(area = count, fill = group,
+                     label = paste(group, count, scales::percent(count/sum(count),
+                                                                 accuracy = 0.1),
+                                   sep ="\n" ))) +
+  geom_treemap() +
+  scale_fill_aaas() +
+  geom_treemap_text(fontface = "italic", size = 12,colour = "white", place = "centre") +
+  theme(legend.position = "none") +
+  labs(title = "RFM-анализ")
+```
+
+
+Данные по подразделениям:
+
+```{r}
+# Таблица по подразделениям    
+subdiv_segments <- df_segments %>% 
+    select(-customer_id) %>% 
+    group_by(subdiv_name, segment) %>% 
+    tally() %>%
+    pivot_wider(names_from = segment, values_from = n) %>% 
+    mutate(across(everything(), ~replace_na(.x, 0))
+         #,`ВСЕГО` = rowSums(across(where(is.numeric)))
+          ) %>% 
+    janitor::adorn_totals(where = c("row", "col"), name = "ВСЕГО") %>% 
+    rename(`Подразделение` = subdiv_name)
+DT::datatable(subdiv_segments, rownames = FALSE, extensions = c('Buttons', 'ColReorder',
+                                                                'FixedColumns'
+                                                             # , 'Scroller'
+                                                                ),
+              options = list(
+                    pageLength = 10,
+                    autoWidth = TRUE,
+                    columnDefs = list(list(width = '100px', targets = c(0))),
+                    colReorder = TRUE,
+                    dom = 'Bfrtip',
+                    buttons = 'excel',
+                    scrollX = TRUE,
+                    fixedColumns = list(rightColumns = 1),
+                    deferRender = TRUE,
+                    #scroller = TRUE
+                    initComplete = DT::JS(
+                       "function(settings, json) {",
+                       "$(this.api().table().header()).css({'font-size': '80%'});",
+                        "}")
+                  ))
+```
+
+
+По менеджерам:
+
+```{r}
+# Таблица по подразделениям и менеджерам 
+managers_segment <- df_segments %>% 
+    select(-customer_id) %>% 
+    group_by(subdiv_name, customer_manager, segment) %>% 
+    tally() %>%
+    pivot_wider(names_from = segment, values_from = n) %>% 
+    mutate(across(everything(), ~replace_na(.x, 0))) %>% 
+    janitor::adorn_totals(where = c("row", "col"), name = "ВСЕГО") %>% 
+    rename(`Подразделение` = subdiv_name,
+           `Менеджер` = customer_manager)
+DT::datatable(managers_segment,  rownames = FALSE, extensions = c('Buttons', 'ColReorder',
+                                                                'FixedColumns'
+                                                             # , 'Scroller'
+                                                                ),
+              options = list(
+                    pageLength = 10,
+                    autoWidth = TRUE,
+                    columnDefs = list(list(width = '100px', targets = c(0))),
+                    colReorder = TRUE,
+                    dom = 'Bfrtip',
+                    buttons = 'excel',
+                    scrollX = TRUE,
+                    fixedColumns = list(rightColumns = 1),
+                    deferRender = TRUE,
+                    #scroller = TRUE
+                    initComplete = DT::JS(
+                       "function(settings, json) {",
+                       "$(this.api().table().header()).css({'font-size': '80%'});",
+                        "}")
+                  ))
+```
+
+
+Информация по сегментам, входящих в Чемпионы и Лояльные:
+
+```{r}
+top_segments <-  df_segments %>% 
+    filter(segment %in% c("Чемпионы", "Лояльные")) %>% 
+    mutate(segment_form = fct_lump_n(segment_form, 15)) %>%
+    count(segment_form, sort = TRUE)
+
+top_segments %>% 
+    ggplot(aes(x = reorder(segment_form, n), y = n)) +
+    geom_col(fill = 'steelblue') +
+    geom_text(aes(label = n), hjust = -0.5, size = 3) +
+    scale_y_continuous(limits=c(0, 750)) +
+    coord_flip() +
+    labs(x = "Сегмент", y = "Количество покупателей",
+         title = "Количество покупателей по ТОР-15 сегментам") +
+    theme_minimal()
+round(sum(top_segments[-1, 2]) / sum(top_segments[, 2]) * 100, 1)
+```
+
+На ТОП-15 сегментов приходится `r round(sum(top_segments[-1, 2]) / sum(top_segments[, 2]) * 100, 1)`% всех покупателей. 
+
+
+### Изменения за месяц
+
+Посмотрим, какие изменения произошли за месяц:
+
+```{r}
+rfm_data_prev <- sale_df_new %>%
+    filter(date_sale_doc < date_finish - months(1)) %>% 
+    group_by(customer_rfm_id, subdiv_new) %>% 
+    summarise(recency = as.numeric(as.Date(date_finish - months(1)) - max(date_sale_doc)),
+              frequency = n(),
+              monetary  = sum(sum_customer)) %>% 
+    ungroup() %>%
+    mutate(customer_code = paste(customer_rfm_id,
+                                 subdiv_new,
+                                 sep = ";")) %>% 
+    select(customer_code, recency, frequency, monetary)
+
+rfm_result_prev <- rfm_table_customer(rfm_data_prev,
+                                      customer_id = customer_code,
+                                      n_transactions =  frequency,
+                                      recency_days = recency,
+                                      total_revenue = monetary,
+                                      analysis_date = date_finish - months(1),
+                                      recency_bins = c(31, 61, 161),
+                                      frequency_bins = c(3, 8, 16),
+                                      monetary_bins = c(1500, 10000, 50000))
+
+segments_prev <- rfm_segment(rfm_result_prev, segment_names,
+                             recency_lower, recency_upper,
+                             frequency_lower, frequency_upper,
+                             monetary_lower, monetary_upper)
+
+segments_prev <- segments_prev %>% 
+    mutate(segment = case_when(
+        between(rfm_score, 332, 334) ~ "Потенциально лояльные",
+        between(rfm_score, 341, 342) ~ "Потенциально лояльные",
+        rfm_score == 432 ~ "Потенциально лояльные",
+        between(rfm_score, 321, 324) ~ "Требующие внимания",
+        rfm_score == 331 ~ "Требующие внимания",
+        between(rfm_score, 221, 224) ~ "Риск потерять",
+        between(rfm_score, 231, 232) ~ "Риск потерять",
+        rfm_score == 241 ~ "Риск потерять",
+        TRUE ~ segment
+    ))
+
+
+library(networkD3)
+
+df_sankey <- segments_prev %>% 
+    select(customer_id, segment) %>%
+    separate(customer_id, into = c("customer_id", "subdiv_name"),
+             sep = ";") %>%
+    left_join(select(ref_customers, customer_id, customer_name)) %>% 
+    left_join(select(df_segments,
+                     customer_name, subdiv_name, customer_type, main_change_flag,
+                     subdiv_change_flag, rfm_score, customer_manager,
+                     current_segment = segment),
+              by = c("customer_name", "subdiv_name")) %>% 
+    mutate(current_segment = ifelse(is.na(current_segment), "Потерянные > полгода",
+                                    current_segment))
+links <- df_sankey %>% 
+    count(segment, current_segment, sort = TRUE) %>% 
+    rename(source = segment,
+           target = current_segment,
+           value  = n) %>% 
+    mutate(target = paste0(target, " "))
+ 
+nodes <- data.frame(
+    name = c(as.character(links$source), as.character(links$target)) %>% 
+    unique())
+
+links <- links %>% 
+    mutate(IDsource = match(source, nodes$name)-1,
+           IDtarget = match(target, nodes$name)-1) %>% 
+    as.data.frame()
+  
+# prepare colour scale
+ColourScal ='d3.scaleOrdinal() .range(["#FDE725FF","#B4DE2CFF","#6DCD59FF","#35B779FF","#1F9E89FF","#26828EFF","#31688EFF","#3E4A89FF","#482878FF","#440154FF"])'
+
+
+# Make the Network
+sankeyNetwork(Links = links, Nodes = nodes,
+              Source = "IDsource", Target = "IDtarget",
+              Value = "value", NodeID = "name", 
+              sinksRight=TRUE, colourScale=ColourScal, nodeWidth=40, fontSize=10, nodePadding=20)
+```
+
+
+Изменения по подразделениям/менеджерам:
+
+```{r}
+df_sankey %>%
+    select(-customer_id) %>% 
+    relocate(segment, current_segment, customer_name, customer_type, main_change_flag,
+             subdiv_change_flag, rfm_score, subdiv_name, customer_manager) %>% 
+    DT::datatable(rownames = FALSE, colnames = c('Прошлый', 'Текущий', 'Покупатель',
+                                                 'Тип', 'Флаг Головной', 'Флаг изм.подр.',
+                                                 'RFM-счет', 'Подразделение', 'Менеджер'),
+                  filter = 'top',
+                  extensions = c('Buttons'
+                                 , 'Scroller'
+                                ),
+              options = list(
+                    #pageLength = 10,
+                    #autoWidth = TRUE,
+                    columnDefs = list(list(width = '100px', targets = c(3))),
+                    dom = 'Bfrtip',
+                    buttons = 'excel',
+                    scrollX = TRUE,
+                    deferRender = TRUE,
+                    scrollY = 200,
+                    scroller = TRUE
+
+                  )) %>% 
+    DT::formatStyle(columns = c(3), fontSize = '70%')
+```
+

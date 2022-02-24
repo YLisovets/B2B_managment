@@ -1,0 +1,254 @@
+---
+title: "План-факт на неделю"
+output:
+   html_document:
+       theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, out.width = '100%')
+
+library(tidyverse)
+library(lubridate)
+library(CLVTools)
+```
+
+```{r}
+source(here::here("global.R"))
+
+rm(list = ls(pattern = "tbl", all.names = TRUE))
+
+date_finish <- as_datetime(ceiling_date(today(), unit = "week")) - weeks(1)
+
+date_start  <- date_finish - days(6)
+date_start_for_base <- date_start + years(2000)
+
+predict_data <- readxl::read_xlsx(paste0("Планирование/План_на_неделю_",
+                                        week(date_start - days(1)), ".xlsx"))
+
+sale_df_previos <- read_rds(file = paste0("Data/sale_df_finish_",
+                                            month(date_start - months(1), label = TRUE),
+                                            ".xlsx"))
+```
+
+
+
+```{r}
+sale_data <- sale_data_global(date_start_for_base, date_start_for_base + days(7)) %>% 
+    filter(project %in% c("Новый клиент", "Сервис", "Сервіс ГОТІВКА"),
+           !subdiv_name %in% c("Бухгалтерия", "Администрация",
+                               "Відділ складської логістики",
+                               "Тендерний відділ", "Кам'янецька,72"),
+           !str_detect(customer_name, "Кінцевий покупець"),
+           !str_detect(customer_name, "КІНЦЕВИЙ ПОКУПЕЦЬ")
+    ) %>% 
+    mutate(subdiv_name = str_replace(subdiv_name, "роздріб", "сервіс"),
+           date_sale_doc = as.Date(date_sale_doc) - years(2000))
+
+returns_data <- refund_data(date_start_for_base, date_start_for_base + days(7)) %>% 
+    mutate(date_refund_doc = as.Date(date_refund_doc) - years(2000),
+           date_sale_doc = as.Date(date_sale_doc) - years(2000)) %>% 
+    filter(date_sale_doc >= date_start - years(2000)) %>% 
+    group_by(nmbr_sale_doc, date_sale_doc) %>% 
+    summarise(sum_refund = sum(item_sum))
+
+retail_customers <- data.frame(customer_id = unique(sale_data$customer_id)) %>%
+    left_join(ref_customers) %>% 
+    filter(is.na(customer_type) & edrp_code == "") %>% 
+    pull(customer_id)
+
+sale_df <- sale_data %>% 
+    
+    # Добавляем возвраты
+    left_join(returns_data) %>% 
+    replace_na(list(sum_refund = 0)) %>% 
+    mutate(doc_sum = doc_sum - sum_refund) %>%
+    
+    # Удаляем документы, по которым возвраты на ту же сумму
+    filter(doc_sum > 0) %>% 
+    
+    # Объединяем документы одного дня по подразделению  
+    group_by(customer_id, subdiv_name, date_sale_doc) %>% 
+    summarise(sum_customer = sum(doc_sum)) %>%
+    ungroup() %>% 
+    
+    # Удаляем документы ниже 1грн    
+    filter(sum_customer > 1) %>% 
+
+    # Удаляем конечных покупателей ("PROM", "Интернет-магазин" и др.)
+    filter(!customer_id %in% retail_customers)
+
+ref_partner_manager_clr <- ref_partner_manager %>%
+    filter(partner_id %in% unique(sale_df$customer_id)) %>% 
+    mutate(date_entry = as.Date(date_entry) - years(2000)) %>% 
+
+ ## Если есть менеджер, но нет подразделения - определяем к какому подразделению
+ ## прикреплен менеджер 
+    left_join(ref_users) %>% 
+    mutate(subdiv_name_new = ifelse(!is.na(subdiv_name),
+                                    subdiv_name,
+                                    user_subdiv)) %>% 
+   ## Удаляем дубликаты записей (оставляем с последней датой)
+    arrange(desc(date_entry)) %>% 
+    distinct(partner_id, subdiv_name_new, user_name, .keep_all = TRUE) %>%
+
+       ## Добавляем основного менеджера и его подразделение 
+    left_join(select(ref_customers, customer_id, main_manager),
+              by = c("partner_id" = "customer_id")) %>%
+    drop_na(subdiv_name_new) %>% 
+    mutate(user_name = str_trim(user_name, side = "right"),
+           main_manager = str_trim(main_manager, side = "right")) %>%
+    left_join(select(ref_users, user_name, main_manager_subdiv_assigned = user_subdiv),
+              by = c("main_manager" = "user_name")) %>%
+ ## Если по контрагенту по подразделению определено 2 разных менеджера - основной
+    arrange(partner_id, subdiv_name_new) %>%
+    group_by(partner_id, subdiv_name_new) %>% 
+    mutate(customer_manager = ifelse(!is.na(main_manager_subdiv_assigned) &
+                                         main_manager_subdiv_assigned == subdiv_name_new,
+                                      main_manager, first(user_name))) %>%
+    ungroup() %>% 
+    distinct(partner_id, subdiv_name_new, customer_manager, .keep_all = TRUE) %>%
+
+     ## Если по контрагенту менеджер указан по нескольким подразделениям - выбираем
+     ## подразделение по последней дате_CRM
+    group_by(partner_id, customer_manager) %>%
+    mutate(subdiv_name_new = subdiv_name_new[date_entry == max(date_entry)]) %>% 
+    ungroup() %>% 
+    distinct(partner_id, customer_manager, .keep_all = TRUE) %>%
+    
+    select(customer_id = partner_id, subdiv_name = subdiv_name_new, customer_manager)
+
+customers_with_one_managers <- ref_partner_manager_clr %>% 
+    group_by(customer_id) %>% 
+    filter(n() == 1) %>% 
+    ungroup() %>%
+    #mutate(user_name = str_trim(user_name, side = "right")) %>% 
+    select(customer_id, only_one_manager = customer_manager,
+           only_one_man_subdiv = subdiv_name)
+
+previos_customers_data <- sale_df_previos %>% 
+    select(customer_id, customer_rfm_id, subdiv_name, subdiv_new, customer_manager_new,
+           registr_date_rfm, main_flag, subdiv_change_flag) %>% 
+    distinct(customer_id, subdiv_name, .keep_all = TRUE)
+
+previos_customers_data_change_subdiv <- sale_df_previos %>% 
+    select(customer_id, customer_rfm_id_2 = customer_rfm_id, subdiv_new,
+           customer_manager_new_2 = customer_manager_new) %>% 
+    distinct(customer_id, subdiv_new, .keep_all = TRUE)
+
+previos_customers_data_main_cust <- sale_df_previos %>% 
+    select(customer_rfm_id, subdiv_new,
+           customer_manager_new_3 = customer_manager_new,
+           registr_date_rfm_3 = registr_date_rfm) %>% 
+    distinct(customer_rfm_id, subdiv_new, .keep_all = TRUE)
+
+rfm_results <- readxl::read_xlsx(paste0("RFM/RFM-анализ_за_",
+                                        month(date_start - months(1),
+                                              label = TRUE, abbr = FALSE),
+                                        ".xlsx")) %>% 
+    select(customer_id, subdiv_name, segment)
+
+sale_df_new <- sale_df %>% 
+    left_join(previos_customers_data) %>% 
+    left_join(ref_partner_manager_clr) %>%
+    left_join(select(ref_customers, customer_id, main_cust_id, customer_type,
+                     registr_date, main_manager)) %>%
+    mutate(registr_date = ifelse(year(registr_date - years(2000)) <= 2016 |
+                                     is.na(registr_date),
+                                 2016,
+                                 year(registr_date - years(2000)))) %>% 
+    mutate(main_manager = str_trim(main_manager, side = "right")) %>%
+    left_join(select(ref_partner_manager_clr, customer_id, customer_manager,
+                     main_manag_subdiv_tbl = subdiv_name),
+              by = c("customer_id" = "customer_id",
+                     "main_manager" = "customer_manager")) %>% 
+    left_join(customers_with_one_managers) %>%
+    left_join(previos_customers_data_change_subdiv,
+              by = c("customer_id",
+                     "subdiv_name" = "subdiv_new")) %>%
+    left_join(previos_customers_data_main_cust,
+              by = c("main_cust_id" = "customer_rfm_id",
+                     "subdiv_name" = "subdiv_new")) %>%
+
+    mutate(customer_rfm_id = ifelse(!is.na(customer_rfm_id),
+                                    customer_rfm_id,
+                                    ifelse(!is.na(customer_rfm_id_2),
+                                          customer_rfm_id_2,
+                                          ifelse(!is.na(customer_manager_new_3),
+                                                 main_cust_id,
+                                                 customer_id))),
+           subdiv_new = ifelse(!is.na(subdiv_new),
+                               subdiv_new,
+                               ifelse(!is.na(only_one_man_subdiv),
+                                       only_one_man_subdiv,
+                                       subdiv_name)),
+           customer_manager_new = ifelse(!is.na(customer_manager_new),
+                                         customer_manager_new,
+                                         ifelse(!is.na(customer_manager_new_2),
+                                                 customer_manager_new_2,
+                                                 ifelse(!is.na(customer_manager_new_3),
+                                                        customer_manager_new_3,
+                                                        ifelse(!is.na(only_one_manager),
+                                                               only_one_manager,
+                                                               customer_manager)))),
+           registr_date_rfm = ifelse(!is.na(registr_date_rfm),
+                                     registr_date_rfm,
+                                     ifelse(!is.na(registr_date_rfm_3) &
+                                                registr_date_rfm_3 < registr_date,
+                                            registr_date_rfm_3,
+                                            registr_date)),
+           main_flag = ifelse(!is.na(main_flag),
+                              main_flag,
+                              ifelse(customer_rfm_id == customer_id,
+                                     0,
+                                     1)),
+           subdiv_change_flag = ifelse(!is.na(subdiv_change_flag),
+                                       subdiv_change_flag,
+                                       ifelse(subdiv_name == subdiv_new,
+                                              0,
+                                              1))
+           ) %>% 
+    group_by(customer_rfm_id, subdiv_new) %>% 
+    summarise(customer_type      = last(customer_type),
+              customer_manager   = last(customer_manager_new),
+              registr_date       = last(registr_date_rfm),
+              main_flag          = last(main_flag),
+              subdiv_change_flag = last(subdiv_change_flag),
+              actual_trans       = n(),
+              actual_sum         = sum(sum_customer)) %>% 
+    left_join(select(ref_customers, customer_id, customer_name),
+              by = c("customer_rfm_id" = "customer_id")) %>% 
+    relocate(customer_name, customer_type, .after = customer_rfm_id) %>% 
+    left_join(rfm_results,
+              by = c("customer_rfm_id" = "customer_id",
+                     "subdiv_new" = "subdiv_name")) %>% 
+    relocate(segment, .after = customer_name)
+
+names(sale_df_new) <- c("Код_покупателя", "Наименование_покупателя", "RFM-статус",
+                        "Тип", "Подразделение", "Менеджер", "Год регистрации",
+                        "Флаг_измен_Головной", "Флаг_измен_Подразд",
+                        "Факт_транзакций", "Факт_Сумма")
+
+prediction_df <- predict_data %>% 
+    full_join(sale_df_new) %>% 
+    replace_na(list(`Факт_транзакций` = 0,
+                    `Факт_Сумма` = 0,
+                    `Кол-во_транзакций` = 0,
+                    `Прогноз_Сумма` = 0))
+
+pred_subdiv <- prediction_df %>% 
+    group_by(`Подразделение`) %>% 
+    summarise(`Прогноз_Сумма_подр` = round(sum(`Прогноз_Сумма`)),
+              `Факт_Сумма_подр`    = round(sum(`Факт_Сумма`)),
+              `Кол-во_покупателей(план)` = sum(`Прогноз_Сумма` > 0),
+              `Кол-во_покупателей(факт)` = sum(`Факт_Сумма` > 0),
+              `Кол-во_правильно_предсканных` = sum(`Прогноз_Сумма` > 0 &
+                                                       `Факт_Сумма` > 0)) %>% 
+    janitor::adorn_totals(where = "row", name = "ВСЕГО")
+
+writexl::write_xlsx(list(prediction_df, pred_subdiv),
+                    paste0("Планирование/План_факт_неделя_",
+                            week(date_start - days(1)),
+                            ".xlsx"))
+```
+
