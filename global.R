@@ -9,7 +9,7 @@ con <- dbConnect(odbc(),
                  Server = "SERVER2",
                  Database = "work",
                  UID = "sa",
-                 PWD = "server232", # rstudioapi::askForPassword("Database password")
+                 PWD = rstudioapi::askForPassword("Database password")
 )
 
 tbl_item <- tbl(con, "_Reference120") %>% 
@@ -239,7 +239,7 @@ get_face <- function() {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     tbl_face <- tbl(con,"_InfoRg16359") %>% 
@@ -284,7 +284,7 @@ get_norm <- function() {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     tbl_norm <- tbl(con,"_InfoRg18379") %>% 
@@ -330,7 +330,7 @@ checks_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -383,7 +383,7 @@ receipt_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
 
     date_start <- as_datetime(date_start)
@@ -464,7 +464,7 @@ supplier_order_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -558,7 +558,7 @@ return_supplier_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -638,7 +638,7 @@ inspection_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -721,7 +721,7 @@ assembly_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -794,7 +794,7 @@ delivery_order_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -886,7 +886,7 @@ customer_order_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -955,7 +955,7 @@ sale_data_full <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1020,7 +1020,7 @@ sale_data_global <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1082,7 +1082,7 @@ refund_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1151,7 +1151,7 @@ sale_plan_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1212,7 +1212,7 @@ cost_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1268,7 +1268,7 @@ delivery_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1368,7 +1368,7 @@ partner_current_debt_data <- function() {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(today() + years(2000))
@@ -1425,7 +1425,7 @@ customer_debt_moving_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1491,7 +1491,7 @@ supplier_debt_moving_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1550,7 +1550,7 @@ telemarketing_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(date_start)
@@ -1617,7 +1617,7 @@ current_stock_balance <- function() {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
     
     date_start <- as_datetime(today() + years(2000))
@@ -1658,7 +1658,7 @@ stock_motion_data <- function(date_start, date_finish) {
                      Server = "SERVER2",
                      Database = "work",
                      UID = "sa",
-                     PWD = "server232", # rstudioapi::askForPassword("Database password")
+                     PWD = rstudioapi::askForPassword("Database password")
     )
 
     date_start <- as_datetime(date_start)
